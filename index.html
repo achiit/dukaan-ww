@@ -1,0 +1,439 @@
+
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Smart Object Counter HD</title>
+
+<style>
+*{box-sizing:border-box}
+body{
+ margin:0;
+ padding:15px;
+ background:#edf4ed;
+ font-family:Arial,sans-serif;
+ color:#18351f;
+}
+.app{
+ max-width:600px;
+ margin:auto;
+ background:white;
+ padding:18px;
+ border-radius:20px;
+ box-shadow:0 5px 25px #0002;
+}
+h1{text-align:center;color:#16843b;font-size:25px}
+.sub{text-align:center;color:#777}
+.buttons{
+ display:grid;
+ grid-template-columns:1fr 1fr;
+ gap:10px;
+ margin:18px 0;
+}
+button{
+ padding:14px 8px;
+ border:0;
+ border-radius:12px;
+ background:#19843b;
+ color:white;
+ font-size:15px;
+ font-weight:bold;
+ cursor:pointer;
+}
+button:disabled{opacity:.5}
+.secondary{background:#344c3a}
+#imageArea{
+ position:relative;
+ width:100%;
+ margin-top:15px;
+}
+#photo,#overlay{
+ display:block;
+ width:100%;
+ border-radius:12px;
+}
+#photo{max-height:420px;object-fit:contain;background:#eee}
+#overlay{
+ position:absolute;
+ top:0;
+ left:0;
+ height:100%;
+ cursor:crosshair;
+}
+.result{
+ background:#e7f8e8;
+ border-radius:15px;
+ text-align:center;
+ padding:20px;
+ margin-top:18px;
+}
+.number{
+ font-size:55px;
+ font-weight:bold;
+ color:#16843b;
+}
+#status{
+ text-align:center;
+ padding:12px;
+ color:#805b16;
+ font-size:14px;
+}
+#list{
+ padding:0;
+ list-style:none;
+}
+#list li{
+ padding:10px;
+ border-bottom:1px solid #eee;
+ display:flex;
+ justify-content:space-between;
+}
+.note{
+ font-size:12px;
+ line-height:1.6;
+ color:#777;
+}
+</style>
+</head>
+
+<body>
+
+<div class="app">
+
+<h1>📷 SMART OBJECT COUNTER</h1>
+<p class="sub">AI Photo Counting System HD</p>
+
+<div class="buttons">
+<button onclick="document.getElementById('camera').click()">
+📷 CAMERA
+</button>
+
+<button onclick="document.getElementById('gallery').click()">
+🖼️ GALLERY
+</button>
+</div>
+
+<input id="camera" type="file"
+accept="image/*" capture="environment"
+hidden>
+
+<input id="gallery" type="file"
+accept="image/*" hidden>
+
+<div id="imageArea">
+<img id="photo" alt="Selected photo" hidden>
+<canvas id="overlay"></canvas>
+</div>
+
+<div class="buttons">
+<button id="scan" disabled>🔍 AI COUNT</button>
+<button class="secondary" id="manual" disabled>
+✋ MANUAL MODE
+</button>
+</div>
+
+<div class="buttons">
+<button class="secondary" id="reset">
+RESET COUNT
+</button>
+<button class="secondary" id="clear">
+CLEAR PHOTO
+</button>
+</div>
+
+<div id="status">
+पहले कैमरा या गैलरी से फोटो चुनें।
+</div>
+
+<div class="result">
+<h3>TOTAL OBJECTS</h3>
+<div class="number" id="total">0</div>
+<p>कुल गिनी गई चीजें</p>
+</div>
+
+<h3>📊 पहचान की जानकारी</h3>
+<ul id="list">
+<li>अभी कोई गिनती नहीं हुई</li>
+</ul>
+
+<p class="note">
+AI मॉडल लोड होने के लिए इंटरनेट जरूरी है।
+मॉडल सामान्य पहचानी जाने वाली वस्तुओं को गिनता है।
+मैन्युअल मोड में फोटो में दिखने वाली हर वस्तु पर
+एक बार टैप करके गिनती कर सकते हैं।
+</p>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+
+<script>
+const photo = document.getElementById("photo");
+const canvas = document.getElementById("overlay");
+const ctx = canvas.getContext("2d");
+
+const camera = document.getElementById("camera");
+const gallery = document.getElementById("gallery");
+
+const scan = document.getElementById("scan");
+const manual = document.getElementById("manual");
+
+const total = document.getElementById("total");
+const status = document.getElementById("status");
+const list = document.getElementById("list");
+
+let model = null;
+let ready = false;
+let manualMode = false;
+let detections = [];
+let manualPoints = [];
+let photoURL = null;
+
+function updateTotal(){
+ total.textContent = detections.length + manualPoints.length;
+}
+
+function showList(){
+ list.innerHTML = "";
+
+ const counts = {};
+
+ detections.forEach(item=>{
+  counts[item.class] = (counts[item.class] || 0) + 1;
+ });
+
+ Object.keys(counts).forEach(name=>{
+  const li = document.createElement("li");
+  li.textContent = name + " : " + counts[name] + " पीस";
+  list.appendChild(li);
+ });
+
+ if(manualPoints.length){
+  const li = document.createElement("li");
+  li.textContent = "Manual Objects : " + manualPoints.length;
+  list.appendChild(li);
+ }
+
+ if(!detections.length && !manualPoints.length){
+  list.innerHTML="<li>कोई वस्तु नहीं मिली</li>";
+ }
+
+ updateTotal();
+}
+
+function draw(){
+ if(!ready)return;
+
+ const w = photo.naturalWidth;
+ const h = photo.naturalHeight;
+
+ canvas.width = w;
+ canvas.height = h;
+
+ ctx.clearRect(0,0,w,h);
+
+ detections.forEach(item=>{
+  const [x,y,bw,bh] = item.bbox;
+
+  ctx.strokeStyle="#00d65a";
+  ctx.lineWidth=Math.max(3,w/250);
+  ctx.strokeRect(x,y,bw,bh);
+
+  ctx.fillStyle="#00a83e";
+  ctx.font="bold "+Math.max(18,w/40)+"px Arial";
+  ctx.fillText(item.class,x,y>25?y-7:y+25);
+ });
+
+ manualPoints.forEach((point,i)=>{
+  ctx.beginPath();
+  ctx.arc(point.x,point.y,Math.max(12,w/65),0,Math.PI*2);
+  ctx.fillStyle="red";
+  ctx.fill();
+
+  ctx.fillStyle="white";
+  ctx.font="bold "+Math.max(14,w/55)+"px Arial";
+  ctx.fillText(i+1,point.x-5,point.y+5);
+ });
+
+ showList();
+}
+
+function loadPhoto(file){
+ if(!file)return;
+
+ if(!file.type.startsWith("image/")){
+  status.textContent="कृपया सही फोटो चुनें।";
+  return;
+ }
+
+ if(photoURL)URL.revokeObjectURL(photoURL);
+
+ photoURL=URL.createObjectURL(file);
+
+ ready=false;
+ detections=[];
+ manualPoints=[];
+ total.textContent="0";
+ list.innerHTML="<li>फोटो तैयार हो रही है...</li>";
+
+ photo.onload=()=>{
+  ready=true;
+  photo.hidden=false;
+
+  canvas.style.display="block";
+  canvas.style.aspectRatio =
+   photo.naturalWidth+"/"+photo.naturalHeight;
+
+  manual.disabled=false;
+  scan.disabled=false;
+
+  manualMode=false;
+
+  draw();
+
+  status.textContent=
+   "फोटो अपलोड सफल! अब AI COUNT दबाएँ।";
+ };
+
+ photo.onerror=()=>{
+  status.textContent=
+   "फोटो खुल नहीं पाई। दूसरी फोटो चुनें।";
+ };
+
+ photo.src=photoURL;
+}
+
+camera.addEventListener("change",()=>{
+ loadPhoto(camera.files[0]);
+ camera.value="";
+});
+
+gallery.addEventListener("change",()=>{
+ loadPhoto(gallery.files[0]);
+ gallery.value="";
+});
+
+// Load AI model
+async function loadAI(){
+ if(model)return model;
+
+ status.textContent="AI मॉडल लोड हो रहा है...";
+
+ if(!window.cocoSsd || !window.tf){
+  throw new Error("AI library load नहीं हुई।");
+ }
+
+ await tf.ready();
+
+ model=await cocoSsd.load({
+  base:"mobilenet_v2"
+ });
+
+ return model;
+}
+
+scan.addEventListener("click",async()=>{
+ if(!ready)return;
+
+ scan.disabled=true;
+ status.textContent="AI फोटो स्कैन कर रहा है...";
+
+ try{
+  const ai=await loadAI();
+
+  const predictions=await ai.detect(photo,40,0.30);
+
+  detections=predictions.filter(p=>p.score>=0.30);
+  manualPoints=[];
+
+  manualMode=false;
+
+  draw();
+
+  status.textContent=
+   "AI स्कैन पूरा! "+detections.length+
+   " वस्तुएँ मिलीं।";
+
+ }catch(error){
+  console.error(error);
+
+  status.textContent=
+   "AI लोड नहीं हुआ। इंटरनेट चेक करें और दोबारा कोशिश करें।";
+
+ }finally{
+  scan.disabled=false;
+ }
+});
+
+// Manual counting for objects AI cannot identify
+manual.addEventListener("click",()=>{
+ if(!ready)return;
+
+ manualMode=true;
+
+ status.textContent=
+  "अब फोटो में हर वस्तु के बीच में एक बार टैप करें।";
+});
+
+canvas.addEventListener("click",event=>{
+ if(!manualMode || !ready)return;
+
+ const rect=canvas.getBoundingClientRect();
+
+ const x=(event.clientX-rect.left)*
+  (canvas.width/rect.width);
+
+ const y=(event.clientY-rect.top)*
+  (canvas.height/rect.height);
+
+ manualPoints.push({x,y});
+
+ draw();
+
+ status.textContent=
+  "मैन्युअल गिनती: "+manualPoints.length+
+  " पीस।";
+});
+
+// Reset
+document.getElementById("reset").onclick=()=>{
+ detections=[];
+ manualPoints=[];
+ manualMode=false;
+
+ draw();
+
+ status.textContent="गिनती रीसेट हो गई।";
+};
+
+// Clear
+document.getElementById("clear").onclick=()=>{
+ ready=false;
+ detections=[];
+ manualPoints=[];
+ manualMode=false;
+
+ photo.hidden=true;
+ photo.removeAttribute("src");
+
+ if(photoURL){
+  URL.revokeObjectURL(photoURL);
+  photoURL=null;
+ }
+
+ ctx.clearRect(0,0,canvas.width,canvas.height);
+
+ scan.disabled=true;
+ manual.disabled=true;
+
+ total.textContent="0";
+ list.innerHTML="<li>अभी कोई गिनती नहीं हुई</li>";
+
+ status.textContent="नई फोटो अपलोड करें।";
+};
+</script>
+
+</body>
+</html>
